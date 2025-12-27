@@ -5,6 +5,8 @@ Handles audio/video transcription with optional word-level timestamps.
 """
 
 import logging
+import ssl
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,6 +14,13 @@ import whisper
 import torch
 
 from app.core.config import get_settings
+
+# Fix SSL certificate issues on macOS
+# This is needed because Python on macOS doesn't use system certificates by default
+if not os.environ.get("SSL_CERT_FILE"):
+    import certifi
+    os.environ["SSL_CERT_FILE"] = certifi.where()
+    os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -49,12 +58,14 @@ class TranscriptionResult:
     segments: list[TranscriptSegment]
 
 
-def transcribe_file(file_path: str | Path) -> TranscriptionResult:
+def transcribe_file(file_path: str | Path, language: str | None = "en") -> TranscriptionResult:
     """
     Transcribe an audio or video file using Whisper.
 
     Args:
         file_path: Path to the audio/video file
+        language: Language code (e.g., "en" for English). Set to None for auto-detection.
+                  Default is "en" to avoid misdetection on short clips.
 
     Returns:
         TranscriptionResult with full text, language, and segments
@@ -64,14 +75,15 @@ def transcribe_file(file_path: str | Path) -> TranscriptionResult:
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
 
-    logger.info(f"Transcribing file: {file_path}")
+    logger.info(f"Transcribing file: {file_path} (language={language or 'auto'})")
 
     model = get_model()
 
-    # Transcribe with word timestamps for better segment accuracy
+    # Transcribe - specify language to avoid misdetection on short clips
     result = model.transcribe(
         str(file_path),
         task="transcribe",
+        language=language,
         verbose=False,
     )
 
@@ -93,9 +105,13 @@ def transcribe_file(file_path: str | Path) -> TranscriptionResult:
         f"{duration:.1f}s duration, language={result.get('language')}"
     )
 
+    # Use specified language if provided, otherwise use detected language
+    detected_language = result.get("language", "en")
+    final_language = language if language else detected_language
+
     return TranscriptionResult(
         text=result["text"].strip(),
-        language=result.get("language", "en"),
+        language=final_language,
         duration=duration,
         segments=segments,
     )

@@ -5,15 +5,18 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
 from app.core.database import engine, Base
-from app.routers import meetings, search, health
+from app.routers import auth, health, meetings, search, streaming
 
 settings = get_settings()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: Create tables
+    # Startup: Enable pgvector extension and create tables
+    from sqlalchemy import text
     async with engine.begin() as conn:
+        # Enable pgvector extension
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.run_sync(Base.metadata.create_all)
     yield
     # Shutdown: Clean up
@@ -38,5 +41,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(health.router, tags=["health"])
+app.include_router(auth.router, prefix="/auth", tags=["auth"])
 app.include_router(meetings.router, prefix="/meetings", tags=["meetings"])
 app.include_router(search.router, prefix="/search", tags=["search"])
+app.include_router(streaming.router, prefix="/streaming", tags=["streaming"])

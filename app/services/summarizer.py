@@ -1,53 +1,29 @@
 """
 Summarization service for meeting transcripts.
 
-Generates summaries and extracts action items from transcripts.
-Uses a local LLM (can be swapped for OpenAI API).
+Uses Google Gemini API for high-quality summaries, with fallback to local models.
 """
 
 import logging
-import re
 from dataclasses import dataclass
-
-from transformers import pipeline
 
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-# Cache pipelines globally
-_summarizer = None
-_generator = None
+# Gemini client (lazy loaded)
+_gemini_client = None
 
 
-def get_summarizer():
-    """Load and cache the summarization pipeline."""
-    global _summarizer
-    if _summarizer is None:
-        logger.info("Loading summarization model...")
-        _summarizer = pipeline(
-            "summarization",
-            model="facebook/bart-large-cnn",
-            device=-1,  # CPU, use 0 for GPU
-        )
-        logger.info("Summarization model loaded")
-    return _summarizer
-
-
-def get_text_generator():
-    """Load and cache a text generation pipeline for action items."""
-    global _generator
-    if _generator is None:
-        logger.info("Loading text generation model...")
-        # Using a smaller model for action item extraction
-        _generator = pipeline(
-            "text2text-generation",
-            model="google/flan-t5-base",
-            device=-1,  # CPU, use 0 for GPU
-        )
-        logger.info("Text generation model loaded")
-    return _generator
+def get_gemini_client():
+    """Get the Gemini client."""
+    global _gemini_client
+    if _gemini_client is None and settings.gemini_api_key:
+        from google import genai
+        _gemini_client = genai.Client(api_key=settings.gemini_api_key)
+        logger.info("Gemini client initialized")
+    return _gemini_client
 
 
 @dataclass
@@ -66,188 +42,201 @@ class MeetingSummary:
     key_topics: list[str]
 
 
-def chunk_text(text: str, max_chunk_size: int = 1000) -> list[str]:
-    """Split text into chunks for processing by models with token limits."""
-    words = text.split()
-    chunks = []
-    current_chunk = []
-    current_size = 0
+def summarize_with_gemini(transcript: str) -> str:
+    """Generate summary using Gemini API."""
+    client = get_gemini_client()
+    if not client:
+        return None
 
-    for word in words:
-        if current_size + len(word) + 1 > max_chunk_size:
-            chunks.append(" ".join(current_chunk))
-            current_chunk = [word]
-            current_size = len(word)
-        else:
-            current_chunk.append(word)
-            current_size += len(word) + 1
+    prompt = f"""Summarize this meeting transcript in 2-3 concise sentences. Focus on the main discussion points and any decisions made.
 
-    if current_chunk:
-        chunks.append(" ".join(current_chunk))
+Transcript:
+{transcript[:8000]}
 
-    return chunks
+Summary:"""
+
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt,
+        )
+        return response.text.strip()
+    except Exception as e:
+        logger.error(f"Gemini summarization error: {e}")
+        return None
+
+
+def extract_action_items_with_gemini(transcript: str) -> list[ActionItem]:
+    """Extract action items using Gemini API."""
+    client = get_gemini_client()
+    if not client:
+        return []
+
+    prompt = f"""Extract action items from this meeting transcript.
+For each action item, provide:
+- The task that needs to be done
+- Who it's assigned to (if mentioned)
+- Any deadline (if mentioned)
+
+Format each as: "- [Task] | Assignee: [name or None] | Due: [date or None]"
+
+If no action items are found, respond with "No action items found."
+
+Transcript:
+{transcript[:8000]}
+
+Action items:"""
+
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt,
+        )
+        output = response.text.strip()
+
+        action_items = []
+        for line in output.split("\n"):
+            line = line.strip()
+            if line.startswith("- ") and "no action items" not in line.lower():
+                # Parse the formatted line
+                parts = line[2:].split("|")
+                text = parts[0].strip()
+                assignee = None
+                due_date = None
+
+                for part in parts[1:]:
+                    part = part.strip()
+                    if part.lower().startswith("assignee:"):
+                        assignee = part[9:].strip()
+                        if assignee.lower() == "none":
+                            assignee = None
+                    elif part.lower().startswith("due:"):
+                        due_date = part[4:].strip()
+                        if due_date.lower() == "none":
+                            due_date = None
+
+                if text:
+                    action_items.append(ActionItem(text=text, assignee=assignee, due_date=due_date))
+
+        logger.info(f"Extracted {len(action_items)} action items with Gemini")
+        return action_items
+    except Exception as e:
+        logger.error(f"Gemini action item extraction error: {e}")
+        return []
+
+
+def extract_key_topics_with_gemini(transcript: str) -> list[str]:
+    """Extract key topics using Gemini API."""
+    client = get_gemini_client()
+    if not client:
+        return []
+
+    prompt = f"""List 3-5 key topics discussed in this meeting. Be specific and concise.
+
+Format: One topic per line, starting with "- "
+
+Transcript:
+{transcript[:8000]}
+
+Key topics:"""
+
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt,
+        )
+        output = response.text.strip()
+
+        topics = []
+        for line in output.split("\n"):
+            line = line.strip()
+            if line.startswith("- ") or line.startswith("• "):
+                topic = line[2:].strip()
+                if topic:
+                    topics.append(topic)
+
+        logger.info(f"Extracted {len(topics)} key topics with Gemini")
+        return topics
+    except Exception as e:
+        logger.error(f"Gemini topic extraction error: {e}")
+        return []
 
 
 def summarize_transcript(transcript: str) -> str:
-    """
-    Generate a summary of the meeting transcript.
-
-    Args:
-        transcript: The full meeting transcript text
-
-    Returns:
-        A concise summary of the meeting
-    """
+    """Generate a summary of the meeting transcript."""
     if not transcript or len(transcript.strip()) < 50:
         return "Meeting transcript too short to summarize."
 
     logger.info(f"Summarizing transcript ({len(transcript)} chars)")
 
-    summarizer = get_summarizer()
+    # Try Gemini first
+    if settings.gemini_api_key:
+        summary = summarize_with_gemini(transcript)
+        if summary:
+            return summary
+        logger.warning("Gemini summarization failed, falling back to local model")
 
-    # Handle long transcripts by chunking
-    chunks = chunk_text(transcript, max_chunk_size=1000)
+    # Fallback to local model
+    return _summarize_with_local_model(transcript)
 
-    if len(chunks) == 1:
-        # Short transcript - summarize directly
-        result = summarizer(
-            transcript,
-            max_length=150,
-            min_length=30,
-            do_sample=False,
-        )
-        return result[0]["summary_text"]
 
-    # Long transcript - summarize chunks then combine
-    chunk_summaries = []
-    for i, chunk in enumerate(chunks):
-        logger.debug(f"Summarizing chunk {i + 1}/{len(chunks)}")
-        result = summarizer(
-            chunk,
-            max_length=100,
-            min_length=20,
-            do_sample=False,
-        )
-        chunk_summaries.append(result[0]["summary_text"])
+def _summarize_with_local_model(transcript: str) -> str:
+    """Fallback summarization using local FLAN-T5 model."""
+    from transformers import pipeline
 
-    # Combine chunk summaries into final summary
-    combined = " ".join(chunk_summaries)
-    if len(combined) > 1000:
-        result = summarizer(
-            combined,
-            max_length=200,
-            min_length=50,
-            do_sample=False,
-        )
-        return result[0]["summary_text"]
+    logger.info("Using local FLAN-T5 for summarization")
+    generator = pipeline(
+        "text2text-generation",
+        model="google/flan-t5-base",
+        device=-1,
+    )
 
-    return combined
+    prompt = f"""Summarize this meeting transcript in 1-2 sentences:
+
+{transcript[:2000]}
+
+Summary:"""
+
+    result = generator(prompt, max_length=150, do_sample=False)
+    return result[0]["generated_text"].strip()
 
 
 def extract_action_items(transcript: str) -> list[ActionItem]:
-    """
-    Extract action items from the meeting transcript.
-
-    Args:
-        transcript: The full meeting transcript text
-
-    Returns:
-        List of action items mentioned in the meeting
-    """
+    """Extract action items from the meeting transcript."""
     if not transcript or len(transcript.strip()) < 50:
         return []
 
     logger.info("Extracting action items from transcript")
 
-    generator = get_text_generator()
+    # Try Gemini first
+    if settings.gemini_api_key:
+        items = extract_action_items_with_gemini(transcript)
+        if items is not None:
+            return items
 
-    # Use a prompt to extract action items
-    prompt = f"""Extract action items from this meeting transcript.
-List each action item on a new line starting with "- ".
-If no action items are found, respond with "No action items found."
-
-Transcript:
-{transcript[:2000]}
-
-Action items:"""
-
-    result = generator(
-        prompt,
-        max_length=300,
-        do_sample=False,
-    )
-
-    output = result[0]["generated_text"]
-
-    # Parse the output into action items
-    action_items = []
-    for line in output.split("\n"):
-        line = line.strip()
-        if line.startswith("- ") or line.startswith("• "):
-            text = line[2:].strip()
-            if text and "no action items" not in text.lower():
-                action_items.append(ActionItem(text=text))
-
-    logger.info(f"Extracted {len(action_items)} action items")
-    return action_items
+    # Fallback: return empty list (local models aren't great at this)
+    return []
 
 
 def extract_key_topics(transcript: str) -> list[str]:
-    """
-    Extract key topics discussed in the meeting.
-
-    Args:
-        transcript: The full meeting transcript text
-
-    Returns:
-        List of main topics discussed
-    """
+    """Extract key topics discussed in the meeting."""
     if not transcript or len(transcript.strip()) < 50:
         return []
 
     logger.info("Extracting key topics from transcript")
 
-    generator = get_text_generator()
+    # Try Gemini first
+    if settings.gemini_api_key:
+        topics = extract_key_topics_with_gemini(transcript)
+        if topics:
+            return topics
 
-    prompt = f"""List the main topics discussed in this meeting.
-Provide 3-5 key topics, one per line starting with "- ".
-
-Transcript:
-{transcript[:2000]}
-
-Key topics:"""
-
-    result = generator(
-        prompt,
-        max_length=150,
-        do_sample=False,
-    )
-
-    output = result[0]["generated_text"]
-
-    # Parse topics
-    topics = []
-    for line in output.split("\n"):
-        line = line.strip()
-        if line.startswith("- ") or line.startswith("• "):
-            topic = line[2:].strip()
-            if topic:
-                topics.append(topic)
-
-    logger.info(f"Extracted {len(topics)} key topics")
-    return topics
+    # Fallback: return empty list
+    return []
 
 
 def analyze_transcript(transcript: str) -> MeetingSummary:
-    """
-    Full analysis of a meeting transcript.
-
-    Args:
-        transcript: The full meeting transcript text
-
-    Returns:
-        MeetingSummary with summary, action items, and key topics
-    """
+    """Full analysis of a meeting transcript."""
     logger.info("Starting full transcript analysis")
 
     summary = summarize_transcript(transcript)

@@ -26,7 +26,8 @@ def get_embedding_model() -> SentenceTransformer:
     global _model
     if _model is None:
         logger.info(f"Loading embedding model: {settings.embedding_model}")
-        _model = SentenceTransformer(settings.embedding_model)
+        # Force CPU to avoid MPS issues with Celery's fork-based multiprocessing on macOS
+        _model = SentenceTransformer(settings.embedding_model, device="cpu")
         logger.info("Embedding model loaded")
     return _model
 
@@ -63,7 +64,7 @@ def chunk_transcript(
 
     # If we have segments with timing, use them for smarter chunking
     if segments:
-        return _chunk_with_segments(segments, chunk_size)
+        return _chunk_with_segments(segments, chunk_size, chunk_overlap)
 
     # Simple character-based chunking
     chunks = []
@@ -96,16 +97,22 @@ def chunk_transcript(
 def _chunk_with_segments(
     segments: list[dict],
     target_chunk_size: int = 500,
+    overlap_size: int = 50,
 ) -> list[TextChunk]:
     """
-    Chunk transcript using segment timing information.
+    Chunk transcript using segment timing information with configurable overlap.
 
     Groups segments together until reaching target size while preserving timing.
+    Overlap is achieved by keeping trailing segments from the previous chunk.
+
+    Args:
+        segments: List of transcript segments with text, start, end
+        target_chunk_size: Target size of each chunk in characters
+        overlap_size: Target overlap size in characters between chunks
     """
     chunks = []
-    current_chunk_text = []
+    current_chunk_segments = []  # Store segment dicts for overlap calculation
     current_chunk_start = None
-    current_chunk_end = None
     current_size = 0
     index = 0
 
@@ -118,39 +125,62 @@ def _chunk_with_segments(
         seg_end = seg.get("end", 0)
 
         # Start new chunk if adding this segment would exceed target size
-        if current_size + len(seg_text) > target_chunk_size and current_chunk_text:
+        if current_size + len(seg_text) > target_chunk_size and current_chunk_segments:
+            # Create chunk from current segments
+            chunk_text = " ".join(s["text"].strip() for s in current_chunk_segments)
+            chunk_end = current_chunk_segments[-1].get("end", 0)
+
             chunks.append(
                 TextChunk(
-                    text=" ".join(current_chunk_text),
+                    text=chunk_text,
                     start_time=current_chunk_start,
-                    end_time=current_chunk_end,
+                    end_time=chunk_end,
                     index=index,
                 )
             )
             index += 1
-            current_chunk_text = []
-            current_chunk_start = None
-            current_size = 0
+
+            # Calculate overlap: keep trailing segments that fit within overlap_size
+            overlap_segments = []
+            overlap_chars = 0
+            for s in reversed(current_chunk_segments):
+                s_len = len(s.get("text", "").strip()) + 1
+                if overlap_chars + s_len <= overlap_size:
+                    overlap_segments.insert(0, s)
+                    overlap_chars += s_len
+                else:
+                    break
+
+            # Start new chunk with overlap segments
+            current_chunk_segments = overlap_segments
+            current_chunk_start = overlap_segments[0].get("start", 0) if overlap_segments else None
+            current_size = overlap_chars
 
         # Add segment to current chunk
-        current_chunk_text.append(seg_text)
+        current_chunk_segments.append({
+            "text": seg_text,
+            "start": seg_start,
+            "end": seg_end,
+        })
         if current_chunk_start is None:
             current_chunk_start = seg_start
-        current_chunk_end = seg_end
         current_size += len(seg_text) + 1
 
     # Don't forget the last chunk
-    if current_chunk_text:
+    if current_chunk_segments:
+        chunk_text = " ".join(s["text"].strip() for s in current_chunk_segments)
+        chunk_end = current_chunk_segments[-1].get("end", 0)
+
         chunks.append(
             TextChunk(
-                text=" ".join(current_chunk_text),
+                text=chunk_text,
                 start_time=current_chunk_start,
-                end_time=current_chunk_end,
+                end_time=chunk_end,
                 index=index,
             )
         )
 
-    logger.info(f"Created {len(chunks)} chunks from {len(segments)} segments")
+    logger.info(f"Created {len(chunks)} chunks from {len(segments)} segments (overlap={overlap_size})")
     return chunks
 
 

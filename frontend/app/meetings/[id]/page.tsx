@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useParams } from 'next/navigation';
+import { useRouter } from 'next/navigation';
 import {
   ArrowLeft,
   Clock,
@@ -12,6 +13,10 @@ import {
   ListChecks,
   Tags,
   Search,
+  Trash2,
+  Pencil,
+  Check,
+  X,
 } from 'lucide-react';
 
 interface Meeting {
@@ -45,6 +50,7 @@ interface SearchResult {
 
 export default function MeetingPage() {
   const params = useParams();
+  const router = useRouter();
   const meetingId = params.id as string;
 
   const [meeting, setMeeting] = useState<Meeting | null>(null);
@@ -53,6 +59,9 @@ export default function MeetingPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [editTitle, setEditTitle] = useState('');
 
   useEffect(() => {
     fetchMeeting();
@@ -93,6 +102,64 @@ export default function MeetingPage() {
       console.error('Search error:', error);
     }
     setIsSearching(false);
+  };
+
+  const handleDelete = async () => {
+    if (!confirm('Are you sure you want to delete this recording? This action cannot be undone.')) return;
+
+    setIsDeleting(true);
+    try {
+      const res = await fetch(`/api/meetings/${meetingId}`, {
+        method: 'DELETE',
+      });
+      if (res.ok) {
+        router.push('/');
+      } else {
+        alert('Failed to delete recording');
+        setIsDeleting(false);
+      }
+    } catch (error) {
+      console.error('Delete error:', error);
+      alert('Failed to delete recording');
+      setIsDeleting(false);
+    }
+  };
+
+  const startEditingTitle = () => {
+    if (meeting) {
+      setEditTitle(meeting.title);
+      setIsEditingTitle(true);
+    }
+  };
+
+  const cancelEditingTitle = () => {
+    setIsEditingTitle(false);
+    setEditTitle('');
+  };
+
+  const handleRename = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editTitle.trim() || !meeting) return;
+
+    try {
+      const res = await fetch(`/api/meetings/${meetingId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: editTitle.trim() }),
+      });
+
+      if (res.ok) {
+        setMeeting({ ...meeting, title: editTitle.trim() });
+      } else {
+        alert('Failed to rename recording');
+      }
+    } catch (error) {
+      console.error('Rename error:', error);
+      alert('Failed to rename recording');
+    }
+
+    setIsEditingTitle(false);
+    setEditTitle('');
   };
 
   const formatTime = (seconds: number | null) => {
@@ -143,13 +210,64 @@ export default function MeetingPage() {
         </a>
         <div className="flex items-start justify-between">
           <div>
-            <h1 className="text-2xl font-bold text-gray-900">{meeting.title}</h1>
+            {isEditingTitle ? (
+              <form onSubmit={handleRename} className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={editTitle}
+                  onChange={(e) => setEditTitle(e.target.value)}
+                  className="text-2xl font-bold text-gray-900 px-2 py-1 border border-gray-300 rounded focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  autoFocus
+                />
+                <button
+                  type="submit"
+                  className="p-1.5 text-green-600 hover:bg-green-50 rounded"
+                  title="Save"
+                >
+                  <Check className="h-5 w-5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={cancelEditingTitle}
+                  className="p-1.5 text-gray-400 hover:bg-gray-100 rounded"
+                  title="Cancel"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </form>
+            ) : (
+              <div className="flex items-center gap-2">
+                <h1 className="text-2xl font-bold text-gray-900">{meeting.title}</h1>
+                <button
+                  onClick={startEditingTitle}
+                  className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors"
+                  title="Rename"
+                >
+                  <Pencil className="h-4 w-4" />
+                </button>
+              </div>
+            )}
             <p className="text-gray-500 mt-1">
               Duration: {formatDuration(meeting.duration_seconds)}
               {meeting.transcript?.language && ` • Language: ${meeting.transcript.language.toUpperCase()}`}
             </p>
           </div>
-          <StatusBadge status={meeting.status} />
+          <div className="flex items-center gap-3">
+            <StatusBadge status={meeting.status} />
+            <button
+              onClick={handleDelete}
+              disabled={isDeleting}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-red-600 hover:text-red-700 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-50"
+              title="Delete recording"
+            >
+              {isDeleting ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Trash2 className="h-4 w-4" />
+              )}
+              Delete
+            </button>
+          </div>
         </div>
       </div>
 

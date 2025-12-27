@@ -1,13 +1,14 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Upload, Search, Mic, FileVideo, Clock, CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
+import { Upload, Search, Mic, FileVideo, Clock, CheckCircle, AlertCircle, Loader2, Trash2, Pencil, Check, X } from 'lucide-react';
 
 interface Meeting {
   id: string;
   title: string;
   status: string;
   duration_seconds: number | null;
+  isOptimistic?: boolean; // For optimistic UI updates
 }
 
 interface SearchResult {
@@ -20,6 +21,7 @@ interface SearchResult {
 }
 
 const statusConfig: Record<string, { icon: React.ReactNode; color: string; text: string }> = {
+  uploading: { icon: <Loader2 className="h-4 w-4 animate-spin" />, color: 'text-purple-600 bg-purple-50', text: 'Uploading' },
   pending: { icon: <Clock className="h-4 w-4" />, color: 'text-yellow-600 bg-yellow-50', text: 'Pending' },
   processing: { icon: <Loader2 className="h-4 w-4 animate-spin" />, color: 'text-blue-600 bg-blue-50', text: 'Processing' },
   transcribed: { icon: <Loader2 className="h-4 w-4 animate-spin" />, color: 'text-blue-600 bg-blue-50', text: 'Analyzing' },
@@ -34,6 +36,9 @@ export default function Home() {
   const [isSearching, setIsSearching] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState('');
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editTitle, setEditTitle] = useState('');
 
   // Fetch meetings on load and periodically
   useEffect(() => {
@@ -46,24 +51,111 @@ export default function Home() {
     try {
       const res = await fetch('/api/meetings');
       if (res.ok) {
-        const data = await res.json();
-        setMeetings(data);
+        const serverMeetings = await res.json();
+        // Merge with any optimistic meetings still uploading
+        setMeetings(prev => {
+          const optimisticMeetings = prev.filter(m => m.isOptimistic && m.status === 'uploading');
+          // Dedupe: if server has a meeting, remove any matching optimistic one
+          const serverIds = new Set(serverMeetings.map((m: Meeting) => m.id));
+          const stillOptimistic = optimisticMeetings.filter(m => !serverIds.has(m.id));
+          return [...stillOptimistic, ...serverMeetings];
+        });
       }
     } catch (error) {
       console.error('Error fetching meetings:', error);
     }
   };
 
+  const handleDelete = async (meetingId: string, e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (!confirm('Are you sure you want to delete this recording?')) return;
+
+    setDeletingId(meetingId);
+    try {
+      const res = await fetch(`/api/meetings/${meetingId}`, {
+        method: 'DELETE',
+      });
+      if (res.ok) {
+        setMeetings(prev => prev.filter(m => m.id !== meetingId));
+      } else {
+        alert('Failed to delete recording');
+      }
+    } catch (error) {
+      console.error('Delete error:', error);
+      alert('Failed to delete recording');
+    }
+    setDeletingId(null);
+  };
+
+  const startEditing = (meeting: Meeting, e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setEditingId(meeting.id);
+    setEditTitle(meeting.title);
+  };
+
+  const cancelEditing = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setEditingId(null);
+    setEditTitle('');
+  };
+
+  const handleRename = async (meetingId: string, e: React.MouseEvent | React.FormEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (!editTitle.trim()) return;
+
+    try {
+      const res = await fetch(`/api/meetings/${meetingId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: editTitle.trim() }),
+      });
+
+      if (res.ok) {
+        setMeetings(prev =>
+          prev.map(m => m.id === meetingId ? { ...m, title: editTitle.trim() } : m)
+        );
+      } else {
+        alert('Failed to rename recording');
+      }
+    } catch (error) {
+      console.error('Rename error:', error);
+      alert('Failed to rename recording');
+    }
+
+    setEditingId(null);
+    setEditTitle('');
+  };
+
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    // Generate optimistic ID
+    const optimisticId = `optimistic-${Date.now()}`;
+    const title = file.name.replace(/\.[^/.]+$/, '');
+
+    // Optimistic update: immediately add to list
+    const optimisticMeeting: Meeting = {
+      id: optimisticId,
+      title: title,
+      status: 'uploading',
+      duration_seconds: null,
+      isOptimistic: true,
+    };
+    setMeetings(prev => [optimisticMeeting, ...prev]);
 
     setIsUploading(true);
     setUploadProgress('Uploading...');
 
     const formData = new FormData();
     formData.append('file', file);
-    formData.append('title', file.name.replace(/\.[^/.]+$/, ''));
+    formData.append('title', title);
 
     try {
       const res = await fetch('/api/meetings/upload', {
@@ -72,13 +164,19 @@ export default function Home() {
       });
 
       if (res.ok) {
+        const newMeeting = await res.json();
+        // Replace optimistic meeting with real one
+        setMeetings(prev =>
+          prev.map(m => m.id === optimisticId ? { ...newMeeting, isOptimistic: false } : m)
+        );
         setUploadProgress('Upload complete! Processing...');
-        fetchMeetings();
         setTimeout(() => {
           setIsUploading(false);
           setUploadProgress('');
         }, 2000);
       } else {
+        // Remove optimistic meeting on error
+        setMeetings(prev => prev.filter(m => m.id !== optimisticId));
         const error = await res.json();
         setUploadProgress(`Error: ${error.detail}`);
         setTimeout(() => {
@@ -87,6 +185,8 @@ export default function Home() {
         }, 3000);
       }
     } catch (error) {
+      // Remove optimistic meeting on error
+      setMeetings(prev => prev.filter(m => m.id !== optimisticId));
       setUploadProgress('Upload failed');
       setTimeout(() => {
         setIsUploading(false);
@@ -233,26 +333,94 @@ export default function Home() {
             <ul className="divide-y">
               {meetings.map((meeting) => {
                 const status = statusConfig[meeting.status] || statusConfig.pending;
-                return (
-                  <li key={meeting.id}>
-                    <a
-                      href={`/meetings/${meeting.id}`}
-                      className="flex items-center justify-between px-6 py-4 hover:bg-gray-50 transition-colors"
-                    >
-                      <div className="flex items-center gap-3">
-                        <FileVideo className="h-5 w-5 text-gray-400" />
-                        <div>
-                          <p className="font-medium text-gray-900">{meeting.title}</p>
-                          <p className="text-sm text-gray-500">
-                            Duration: {formatDuration(meeting.duration_seconds)}
-                          </p>
-                        </div>
+                const isClickable = !meeting.isOptimistic || meeting.status !== 'uploading';
+                const isDeleting = deletingId === meeting.id;
+                const isEditing = editingId === meeting.id;
+
+                const content = (
+                  <div className={`flex items-center justify-between px-6 py-4 ${isClickable && !isEditing ? 'hover:bg-gray-50' : 'opacity-70'} transition-colors`}>
+                    <div className="flex items-center gap-3">
+                      <FileVideo className="h-5 w-5 text-gray-400 flex-shrink-0" />
+                      <div className="min-w-0">
+                        {isEditing ? (
+                          <form onSubmit={(e) => handleRename(meeting.id, e)} className="flex items-center gap-2">
+                            <input
+                              type="text"
+                              value={editTitle}
+                              onChange={(e) => setEditTitle(e.target.value)}
+                              onClick={(e) => e.stopPropagation()}
+                              className="px-2 py-1 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                              autoFocus
+                            />
+                            <button
+                              type="submit"
+                              onClick={(e) => handleRename(meeting.id, e)}
+                              className="p-1 text-green-600 hover:bg-green-50 rounded"
+                              title="Save"
+                            >
+                              <Check className="h-4 w-4" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={cancelEditing}
+                              className="p-1 text-gray-400 hover:bg-gray-100 rounded"
+                              title="Cancel"
+                            >
+                              <X className="h-4 w-4" />
+                            </button>
+                          </form>
+                        ) : (
+                          <>
+                            <p className="font-medium text-gray-900 truncate">{meeting.title}</p>
+                            <p className="text-sm text-gray-500">
+                              {meeting.isOptimistic && meeting.status === 'uploading'
+                                ? 'Uploading...'
+                                : `Duration: ${formatDuration(meeting.duration_seconds)}`
+                              }
+                            </p>
+                          </>
+                        )}
                       </div>
+                    </div>
+                    <div className="flex items-center gap-2">
                       <span className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${status.color}`}>
                         {status.icon}
                         {status.text}
                       </span>
-                    </a>
+                      {!meeting.isOptimistic && !isEditing && (
+                        <>
+                          <button
+                            onClick={(e) => startEditing(meeting, e)}
+                            className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors"
+                            title="Rename"
+                          >
+                            <Pencil className="h-4 w-4" />
+                          </button>
+                          <button
+                            onClick={(e) => handleDelete(meeting.id, e)}
+                            disabled={isDeleting}
+                            className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors disabled:opacity-50"
+                            title="Delete recording"
+                          >
+                            {isDeleting ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <Trash2 className="h-4 w-4" />
+                            )}
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                );
+
+                return (
+                  <li key={meeting.id}>
+                    {isClickable && !isEditing ? (
+                      <a href={`/meetings/${meeting.id}`}>{content}</a>
+                    ) : (
+                      content
+                    )}
                   </li>
                 );
               })}

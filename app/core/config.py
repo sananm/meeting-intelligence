@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     debug: bool = True
 
     # Database
-    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/meeting_intelligence"
+    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5433/meeting_intelligence"
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"
@@ -28,9 +28,12 @@ class Settings(BaseSettings):
     whisper_model: str = "base"  # tiny, base, small, medium, large
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
 
-    # Auth (for later)
+    # Auth
     secret_key: str = "change-me-in-production"
     access_token_expire_minutes: int = 60 * 24  # 24 hours
+
+    # Google Gemini API (for summarization)
+    gemini_api_key: str | None = None
 
 
 @lru_cache

@@ -10,6 +10,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import get_settings
 from app.core.database import get_db
+from app.core.security import OptionalUser
 from app.models import Meeting, MeetingInsights, Transcript
 
 router = APIRouter()
@@ -24,7 +25,7 @@ class MeetingCreate(BaseModel):
 class TranscriptResponse(BaseModel):
     id: uuid.UUID
     content: str
-    speaker_labels: dict | None = None
+    speaker_labels: list | None = None
     language: str | None = None
 
     class Config:
@@ -70,6 +71,7 @@ class MeetingListResponse(BaseModel):
 async def upload_meeting(
     title: Annotated[str, Form()],
     file: Annotated[UploadFile, File(description="Audio or video file")],
+    current_user: OptionalUser,
     db: AsyncSession = Depends(get_db),
 ):
     """Upload an audio or video file for transcription"""
@@ -120,10 +122,18 @@ async def upload_meeting(
         title=title,
         audio_url=str(file_path),
         status="pending",
+        owner_id=current_user.id if current_user else None,
     )
     db.add(meeting)
     await db.commit()
-    await db.refresh(meeting)
+
+    # Re-fetch with relationships to avoid lazy loading issues
+    result = await db.execute(
+        select(Meeting)
+        .where(Meeting.id == meeting.id)
+        .options(selectinload(Meeting.transcript), selectinload(Meeting.insights))
+    )
+    meeting = result.scalar_one()
 
     # Trigger Celery task for processing
     from workers.tasks import process_meeting
@@ -134,14 +144,19 @@ async def upload_meeting(
 
 @router.get("", response_model=list[MeetingListResponse])
 async def list_meetings(
+    current_user: OptionalUser,
     skip: int = 0,
     limit: int = 20,
     db: AsyncSession = Depends(get_db),
 ):
-    """List all meetings"""
-    result = await db.execute(
-        select(Meeting).order_by(Meeting.created_at.desc()).offset(skip).limit(limit)
-    )
+    """List all meetings (filtered by user if authenticated)"""
+    query = select(Meeting).order_by(Meeting.created_at.desc())
+
+    # If user is authenticated, show only their meetings
+    if current_user:
+        query = query.where(Meeting.owner_id == current_user.id)
+
+    result = await db.execute(query.offset(skip).limit(limit))
     return result.scalars().all()
 
 
@@ -205,6 +220,33 @@ async def get_insights(
         )
 
     return insights
+
+
+class UpdateMeetingRequest(BaseModel):
+    title: str
+
+
+@router.patch("/{meeting_id}", response_model=MeetingListResponse)
+async def update_meeting(
+    meeting_id: uuid.UUID,
+    update: UpdateMeetingRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Update a meeting's title"""
+    result = await db.execute(select(Meeting).where(Meeting.id == meeting_id))
+    meeting = result.scalar_one_or_none()
+
+    if not meeting:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Meeting not found",
+        )
+
+    meeting.title = update.title
+    await db.commit()
+    await db.refresh(meeting)
+
+    return meeting
 
 
 @router.delete("/{meeting_id}", status_code=status.HTTP_204_NO_CONTENT)
