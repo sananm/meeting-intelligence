@@ -130,6 +130,7 @@ npm run dev
 | `GET` | `/meetings/{id}` | Get meeting with transcript and insights |
 | `PATCH` | `/meetings/{id}` | Update meeting title |
 | `DELETE` | `/meetings/{id}` | Delete a meeting |
+| `POST` | `/meetings/{id}/reprocess` | Re-run transcription and analysis |
 
 ### Search
 
