@@ -16,6 +16,7 @@ import {
   Pencil,
   Check,
   X,
+  RotateCcw,
 } from 'lucide-react';
 
 interface Meeting {
@@ -59,6 +60,7 @@ export default function MeetingPage() {
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isReprocessing, setIsReprocessing] = useState(false);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [editTitle, setEditTitle] = useState('');
 
@@ -122,6 +124,24 @@ export default function MeetingPage() {
       alert('Failed to delete recording');
       setIsDeleting(false);
     }
+  };
+
+  const handleReprocess = async () => {
+    setIsReprocessing(true);
+    try {
+      const res = await fetch(`/api/meetings/${meetingId}/reprocess`, {
+        method: 'POST',
+      });
+      if (res.ok) {
+        fetchMeeting();
+      } else {
+        alert('Failed to start reprocessing');
+      }
+    } catch (error) {
+      console.error('Reprocess error:', error);
+      alert('Failed to start reprocessing');
+    }
+    setIsReprocessing(false);
   };
 
   const startEditingTitle = () => {
@@ -253,6 +273,19 @@ export default function MeetingPage() {
           </div>
           <div className="flex items-center gap-3">
             <StatusBadge status={meeting.status} />
+            <button
+              onClick={handleReprocess}
+              disabled={isReprocessing || isProcessing}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-blue-600 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition-colors disabled:opacity-50"
+              title="Reprocess with diarization"
+            >
+              {isReprocessing ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <RotateCcw className="h-4 w-4" />
+              )}
+              Reprocess
+            </button>
             <button
               onClick={handleDelete}
               disabled={isDeleting}

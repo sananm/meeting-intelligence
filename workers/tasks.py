@@ -178,11 +178,6 @@ def transcribe_audio(self, meeting_id: str):
     try:
         from app.models import Meeting, Transcript
         from app.services.transcription import transcribe_file, segments_to_json
-        from app.services.diarization import (
-            diarize_audio,
-            merge_transcription_with_diarization,
-            is_diarization_available,
-        )
 
         db = get_db()
         try:
@@ -203,19 +198,6 @@ def transcribe_audio(self, meeting_id: str):
 
             # Convert segments to JSON format
             transcript_segments = segments_to_json(result.segments)
-
-            # Perform speaker diarization if available
-            if is_diarization_available():
-                logger.info(f"Running speaker diarization for meeting {meeting_id}")
-                diarization_result = diarize_audio(meeting.audio_url)
-                if diarization_result:
-                    transcript_segments = merge_transcription_with_diarization(
-                        transcript_segments,
-                        diarization_result.segments,
-                    )
-                    logger.info(
-                        f"Diarization merged: {diarization_result.num_speakers} speakers detected"
-                    )
 
             # Check if transcript already exists
             existing = db.execute(

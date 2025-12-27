@@ -323,3 +323,60 @@ async def reanalyze_meeting(
     await db.refresh(meeting.insights if meeting.insights else insights)
 
     return meeting.insights if meeting.insights else insights
+
+
+class ReprocessResponse(BaseModel):
+    status: str
+    meeting_id: uuid.UUID
+
+
+@router.post("/{meeting_id}/reprocess", response_model=ReprocessResponse)
+async def reprocess_meeting(
+    meeting_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Reprocess a meeting through the full pipeline (transcription + diarization + insights).
+
+    This clears idempotency keys and re-runs transcription with speaker diarization.
+    """
+    import redis
+    import os
+
+    # Check meeting exists and has audio file
+    result = await db.execute(select(Meeting).where(Meeting.id == meeting_id))
+    meeting = result.scalar_one_or_none()
+
+    if not meeting:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Meeting not found",
+        )
+
+    if not meeting.audio_url:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Meeting has no audio file to reprocess",
+        )
+
+    # Clear idempotency keys so tasks will run again
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    r = redis.from_url(redis_url)
+
+    idempotency_keys = [
+        f"idempotency:transcribe_audio:{meeting_id}",
+        f"idempotency:generate_insights:{meeting_id}",
+        f"idempotency:generate_embeddings:{meeting_id}",
+    ]
+    for key in idempotency_keys:
+        r.delete(key)
+
+    # Update status to pending
+    meeting.status = "pending"
+    await db.commit()
+
+    # Trigger the processing pipeline
+    from workers.tasks import process_meeting
+    process_meeting.delay(str(meeting_id))
+
+    return ReprocessResponse(status="reprocessing", meeting_id=meeting_id)

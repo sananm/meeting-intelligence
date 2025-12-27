@@ -66,7 +66,7 @@ def get_diarization_pipeline():
         logger.info("Loading speaker diarization model...")
         _pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1",
-            use_auth_token=hf_token,
+            token=hf_token,
         )
 
         # Use GPU if available
@@ -122,8 +122,25 @@ def diarize_audio(file_path: str | Path) -> DiarizationResult | None:
     logger.info(f"Diarizing audio file: {file_path}")
 
     try:
+        # Load audio using torchaudio to avoid torchcodec issues
+        import torchaudio
+        waveform, sample_rate = torchaudio.load(str(file_path))
+
+        # pyannote expects mono audio, convert if stereo
+        if waveform.shape[0] > 1:
+            waveform = waveform.mean(dim=0, keepdim=True)
+
+        # Pass audio as dictionary to bypass file loading issues
+        audio_input = {"waveform": waveform, "sample_rate": sample_rate}
+
         # Run diarization
-        diarization = pipeline(str(file_path))
+        diarization_output = pipeline(audio_input)
+
+        # Handle new pyannote API that returns DiarizeOutput object
+        if hasattr(diarization_output, 'speaker_diarization'):
+            diarization = diarization_output.speaker_diarization
+        else:
+            diarization = diarization_output
 
         # Extract speaker segments
         segments = []
