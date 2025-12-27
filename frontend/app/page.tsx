@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Upload, Search, Mic, FileVideo, Clock, CheckCircle, AlertCircle, Loader2, Trash2, Pencil, Check, X } from 'lucide-react';
+import { Upload, Mic, FileVideo, Clock, CheckCircle, AlertCircle, Loader2, Trash2, Pencil, Check, X, Search } from 'lucide-react';
 
 interface Meeting {
   id: string;

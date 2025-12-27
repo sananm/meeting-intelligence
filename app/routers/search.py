@@ -1,6 +1,7 @@
+import logging
 import uuid
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,12 +10,14 @@ from app.core.database import get_db
 from app.models import Meeting, TranscriptChunk
 from app.services.embeddings import generate_embedding
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
 class SearchQuery(BaseModel):
     query: str
     limit: int = 10
+    min_similarity: float = 0.15  # Filter out weak matches
 
 
 class SearchResult(BaseModel):
@@ -47,27 +50,38 @@ async def semantic_search(
     # Generate embedding for the search query
     query_embedding = generate_embedding(search.query)
 
-    # Vector similarity search using pgvector
-    # Using cosine distance (<=>), lower is more similar
-    # Converting to similarity score: 1 - distance
+    # Format embedding for pgvector (no spaces after commas)
+    embedding_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
+
+    # Hybrid search: combines semantic similarity with keyword matching
+    # - semantic_score: vector similarity (0-1)
+    # - keyword_boost: 0.3 bonus if content contains the search term
+    # This ensures exact keyword matches rank higher while still allowing semantic matches
     result = await db.execute(
         text("""
-            SELECT
-                tc.meeting_id,
-                tc.content as chunk_content,
-                tc.start_time,
-                tc.end_time,
-                m.title as meeting_title,
-                1 - (tc.embedding <=> :embedding::vector) as similarity
-            FROM transcript_chunks tc
-            JOIN meetings m ON tc.meeting_id = m.id
-            WHERE tc.embedding IS NOT NULL
-            ORDER BY tc.embedding <=> :embedding::vector
+            SELECT * FROM (
+                SELECT DISTINCT ON (tc.meeting_id)
+                    tc.meeting_id,
+                    tc.content as chunk_content,
+                    tc.start_time,
+                    tc.end_time,
+                    m.title as meeting_title,
+                    1 - (tc.embedding <=> CAST(:embedding AS vector)) as semantic_score,
+                    CASE WHEN LOWER(tc.content) LIKE LOWER(:keyword_pattern) THEN 0.3 ELSE 0 END as keyword_boost
+                FROM transcript_chunks tc
+                JOIN meetings m ON tc.meeting_id = m.id
+                WHERE tc.embedding IS NOT NULL
+                ORDER BY tc.meeting_id, tc.embedding <=> CAST(:embedding AS vector)
+            ) deduped
+            WHERE (semantic_score + keyword_boost) >= :min_similarity
+            ORDER BY (semantic_score + keyword_boost) DESC
             LIMIT :limit
         """),
         {
-            "embedding": str(query_embedding),
+            "embedding": embedding_str,
+            "keyword_pattern": f"%{search.query}%",
             "limit": search.limit,
+            "min_similarity": search.min_similarity,
         },
     )
 
@@ -80,7 +94,7 @@ async def semantic_search(
             chunk_content=row.chunk_content,
             start_time=row.start_time,
             end_time=row.end_time,
-            similarity=float(row.similarity),
+            similarity=float(row.semantic_score) + float(row.keyword_boost),
         )
         for row in rows
     ]
@@ -93,13 +107,18 @@ async def search_within_meeting(
     meeting_id: uuid.UUID,
     query: str = Query(..., min_length=1),
     limit: int = Query(default=5, le=20),
+    min_similarity: float = Query(default=0.15),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Search within a specific meeting's transcript.
+    Search within a specific meeting's transcript using hybrid search.
     """
     query_embedding = generate_embedding(query)
 
+    # Format embedding for pgvector (no spaces after commas)
+    embedding_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
+
+    # Hybrid search within a single meeting
     result = await db.execute(
         text("""
             SELECT
@@ -108,17 +127,20 @@ async def search_within_meeting(
                 tc.start_time,
                 tc.end_time,
                 m.title as meeting_title,
-                1 - (tc.embedding <=> :embedding::vector) as similarity
+                1 - (tc.embedding <=> CAST(:embedding AS vector)) as semantic_score,
+                CASE WHEN LOWER(tc.content) LIKE LOWER(:keyword_pattern) THEN 0.3 ELSE 0 END as keyword_boost
             FROM transcript_chunks tc
             JOIN meetings m ON tc.meeting_id = m.id
-            WHERE tc.meeting_id = :meeting_id
+            WHERE tc.meeting_id = CAST(:meeting_id AS uuid)
               AND tc.embedding IS NOT NULL
-            ORDER BY tc.embedding <=> :embedding::vector
+            ORDER BY (1 - (tc.embedding <=> CAST(:embedding AS vector)) +
+                     CASE WHEN LOWER(tc.content) LIKE LOWER(:keyword_pattern) THEN 0.3 ELSE 0 END) DESC
             LIMIT :limit
         """),
         {
             "meeting_id": str(meeting_id),
-            "embedding": str(query_embedding),
+            "embedding": embedding_str,
+            "keyword_pattern": f"%{query}%",
             "limit": limit,
         },
     )
@@ -132,9 +154,10 @@ async def search_within_meeting(
             chunk_content=row.chunk_content,
             start_time=row.start_time,
             end_time=row.end_time,
-            similarity=float(row.similarity),
+            similarity=float(row.semantic_score) + float(row.keyword_boost),
         )
         for row in rows
+        if (float(row.semantic_score) + float(row.keyword_boost)) >= min_similarity
     ]
 
     return SearchResponse(query=query, results=results)

@@ -18,7 +18,7 @@
 
 ## Overview
 
-Meeting Intelligence transforms your audio recordings into actionable insights. Upload meeting recordings or stream live audio to get automatic transcriptions, AI-generated summaries, action item extraction, and semantic search across all your meetings.
+Meeting Intelligence transforms your audio recordings into actionable insights. Upload meeting recordings or stream live audio to get automatic transcriptions, AI-generated summaries, and semantic search across all your meetings.
 
 ## Features
 
@@ -26,10 +26,8 @@ Meeting Intelligence transforms your audio recordings into actionable insights. 
 |---------|-------------|
 | **Audio Transcription** | Powered by OpenAI Whisper for accurate speech-to-text conversion |
 | **AI Summaries** | Google Gemini-powered meeting summaries with key topics extraction |
-| **Action Items** | Automatic extraction of tasks, assignees, and due dates |
 | **Semantic Search** | Find relevant moments across all meetings using natural language queries |
 | **Live Recording** | Real-time transcription via WebSocket streaming from your browser |
-| **Vector Search** | pgvector-powered similarity search for intelligent content discovery |
 
 ## Tech Stack
 

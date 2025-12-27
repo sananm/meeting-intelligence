@@ -67,25 +67,41 @@ Summary:"""
 
 
 def extract_action_items_with_gemini(transcript: str) -> list[ActionItem]:
-    """Extract action items using Gemini API."""
+    """Extract action items using Gemini API with JSON output."""
+    import json
+
     client = get_gemini_client()
     if not client:
         return []
 
-    prompt = f"""Extract action items from this meeting transcript.
-For each action item, provide:
-- The task that needs to be done
-- Who it's assigned to (if mentioned)
-- Any deadline (if mentioned)
+    prompt = f"""Analyze this meeting transcript and extract ALL action items, tasks, plans, commitments, and follow-ups.
 
-Format each as: "- [Task] | Assignee: [name or None] | Due: [date or None]"
+An action item includes:
+- Tasks someone agreed to do or was assigned
+- Plans or intentions stated ("I will...", "I plan to...", "We need to...")
+- Follow-up tasks or next steps
+- Requests made to specific people ("Can you...", "Please...")
+- Decisions that require action
+- Items to revisit or come back to later
+- Scheduled activities or deadlines mentioned
 
-If no action items are found, respond with "No action items found."
+Return a JSON array of action items. Each item should have:
+- "task": Description of what needs to be done (required)
+- "assignee": Person responsible, or null if not specified
+- "due_date": Deadline mentioned, or null if not specified
+
+Example output:
+[
+  {{"task": "Send the quarterly report to the team", "assignee": "John", "due_date": "Friday"}},
+  {{"task": "Review the proposal", "assignee": null, "due_date": null}}
+]
+
+If there are no action items, return an empty array: []
+
+IMPORTANT: Return ONLY the JSON array, no other text.
 
 Transcript:
-{transcript[:8000]}
-
-Action items:"""
+{transcript[:8000]}"""
 
     try:
         response = client.models.generate_content(
@@ -94,29 +110,33 @@ Action items:"""
         )
         output = response.text.strip()
 
+        # Clean up the response - remove markdown code blocks if present
+        if output.startswith("```"):
+            lines = output.split("\n")
+            output = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
+        output = output.strip()
+
+        # Parse JSON
+        try:
+            items_data = json.loads(output)
+        except json.JSONDecodeError:
+            # Try to find JSON array in the response
+            import re
+            match = re.search(r'\[.*\]', output, re.DOTALL)
+            if match:
+                items_data = json.loads(match.group())
+            else:
+                logger.warning(f"Could not parse action items JSON: {output[:200]}")
+                return []
+
         action_items = []
-        for line in output.split("\n"):
-            line = line.strip()
-            if line.startswith("- ") and "no action items" not in line.lower():
-                # Parse the formatted line
-                parts = line[2:].split("|")
-                text = parts[0].strip()
-                assignee = None
-                due_date = None
-
-                for part in parts[1:]:
-                    part = part.strip()
-                    if part.lower().startswith("assignee:"):
-                        assignee = part[9:].strip()
-                        if assignee.lower() == "none":
-                            assignee = None
-                    elif part.lower().startswith("due:"):
-                        due_date = part[4:].strip()
-                        if due_date.lower() == "none":
-                            due_date = None
-
-                if text:
-                    action_items.append(ActionItem(text=text, assignee=assignee, due_date=due_date))
+        for item in items_data:
+            if isinstance(item, dict) and item.get("task"):
+                action_items.append(ActionItem(
+                    text=item["task"],
+                    assignee=item.get("assignee"),
+                    due_date=item.get("due_date"),
+                ))
 
         logger.info(f"Extracted {len(action_items)} action items with Gemini")
         return action_items

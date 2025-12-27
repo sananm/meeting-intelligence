@@ -10,7 +10,6 @@ import {
   AlertCircle,
   Loader2,
   FileText,
-  ListChecks,
   Tags,
   Search,
   Trash2,
@@ -55,7 +54,7 @@ export default function MeetingPage() {
 
   const [meeting, setMeeting] = useState<Meeting | null>(null);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'transcript' | 'summary' | 'actions'>('transcript');
+  const [activeTab, setActiveTab] = useState<'transcript' | 'summary'>('transcript');
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -344,13 +343,6 @@ export default function MeetingPage() {
                 icon={<Tags className="h-4 w-4" />}
                 label="Summary"
               />
-              <TabButton
-                active={activeTab === 'actions'}
-                onClick={() => setActiveTab('actions')}
-                icon={<ListChecks className="h-4 w-4" />}
-                label="Action Items"
-                count={meeting.insights?.action_items?.length}
-              />
             </nav>
           </div>
 
@@ -403,35 +395,6 @@ export default function MeetingPage() {
               </div>
             )}
 
-            {activeTab === 'actions' && (
-              <div className="p-6">
-                <h2 className="text-lg font-semibold mb-4">Action Items</h2>
-                {meeting.insights?.action_items && meeting.insights.action_items.length > 0 ? (
-                  <ul className="space-y-3">
-                    {meeting.insights.action_items.map((item, idx) => (
-                      <li key={idx} className="flex items-start gap-3">
-                        <input
-                          type="checkbox"
-                          className="mt-1 h-4 w-4 rounded border-gray-300"
-                        />
-                        <div>
-                          <p className="text-gray-800">{item.text}</p>
-                          {(item.assignee || item.due_date) && (
-                            <p className="text-sm text-gray-500 mt-1">
-                              {item.assignee && `Assigned to: ${item.assignee}`}
-                              {item.assignee && item.due_date && ' • '}
-                              {item.due_date && `Due: ${item.due_date}`}
-                            </p>
-                          )}
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="text-gray-500">No action items found in this meeting.</p>
-                )}
-              </div>
-            )}
           </div>
         </>
       )}

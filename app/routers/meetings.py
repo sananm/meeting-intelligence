@@ -272,3 +272,54 @@ async def delete_meeting(
 
     await db.delete(meeting)
     await db.commit()
+
+
+@router.post("/{meeting_id}/reanalyze", response_model=InsightsResponse)
+async def reanalyze_meeting(
+    meeting_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Re-analyze a meeting to regenerate summary, action items, and key topics"""
+    from app.services.summarizer import analyze_transcript, action_items_to_json
+
+    # Get meeting with transcript
+    result = await db.execute(
+        select(Meeting)
+        .where(Meeting.id == meeting_id)
+        .options(selectinload(Meeting.transcript), selectinload(Meeting.insights))
+    )
+    meeting = result.scalar_one_or_none()
+
+    if not meeting:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Meeting not found",
+        )
+
+    if not meeting.transcript:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Meeting has no transcript to analyze",
+        )
+
+    # Re-run analysis
+    analysis = analyze_transcript(meeting.transcript.content)
+
+    # Update or create insights
+    if meeting.insights:
+        meeting.insights.summary = analysis.summary
+        meeting.insights.action_items = action_items_to_json(analysis.action_items)
+        meeting.insights.key_topics = analysis.key_topics
+    else:
+        insights = MeetingInsights(
+            meeting_id=meeting.id,
+            summary=analysis.summary,
+            action_items=action_items_to_json(analysis.action_items),
+            key_topics=analysis.key_topics,
+        )
+        db.add(insights)
+
+    await db.commit()
+    await db.refresh(meeting.insights if meeting.insights else insights)
+
+    return meeting.insights if meeting.insights else insights
